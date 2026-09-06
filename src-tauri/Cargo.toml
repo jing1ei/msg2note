@@ -1,0 +1,36 @@
+[package]
+name = "msg2note"
+version = "0.1.1"
+description = "Telegram bots that append messages to local markdown files"
+edition = "2021"
+license = "Apache-2.0"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+# Guarantees one running copy. Two copies share this app's config, status and
+# Keychain entries, so each would long-poll the same bot token and append every
+# message to the same markdown file twice.
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+# Advisory (flock-style) file locking so appends to a markdown file coordinate
+# with other processes (e.g. Python scripts) writing to the same file.
+fs2 = "0.4"
+# macOS Keychain-backed token storage. `apple-native` selects the Security
+# framework backend (no backend is enabled by default in keyring 3.x).
+keyring = { version = "3", features = ["apple-native"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

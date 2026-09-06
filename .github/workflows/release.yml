@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Lets you rehearse the build without cutting a tag; the draft release is
+  # only created for tag pushes.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # A universal binary, so one download covers Apple Silicon and Intel.
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Uncomment once an Apple Developer ID is available; until then the
+          # bundle is ad-hoc signed and every download needs the quarantine
+          # attribute cleared by hand (see the release notes below).
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Msg2Note ${{ github.ref_name }}
+          # Left as a draft on purpose: the build is unsigned, so the notes need
+          # the Gatekeeper workaround before anyone downloads it.
+          releaseDraft: true
+          prerelease: false
+          releaseBody: |
+            Unsigned build. macOS quarantines it on download, so after dragging
+            Msg2Note.app to /Applications run:
+
+                xattr -dr com.apple.quarantine /Applications/Msg2Note.app
+
+          args: --target universal-apple-darwin

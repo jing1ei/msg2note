@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quick note</title>
+<style>
+  :root {
+    --serif: ui-serif, "New York", "Iowan Old Style", Palatino, Georgia, serif;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    --card: #fffefb; --text: #1b1a16; --muted: #837d70; --faint: #a8a293;
+    --line: #e8e2d6; --accent: #8a6d3b; --accent-wash: #f6f1e3;
+    --shadow: 0 2px 6px rgba(40,34,22,.10), 0 22px 54px rgba(40,34,22,.20);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --card: #1a1a17; --text: #ece7dd; --muted: #8d8779; --faint: #6a655a;
+      --line: #2c2b26; --accent: #c9a86a; --accent-wash: #221e16;
+      --shadow: 0 2px 6px rgba(0,0,0,.5), 0 24px 60px rgba(0,0,0,.6);
+    }
+  }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body {
+    font-family: var(--sans);
+    display: flex; padding: 10px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    flex: 1; background: var(--card); border: 1px solid var(--line);
+    border-radius: 16px; box-shadow: var(--shadow);
+    padding: 15px 18px; display: flex; flex-direction: column;
+    position: relative; min-width: 0;
+    transition: border-color .16s ease, box-shadow .16s ease;
+  }
+  /* Highlight while a file is dragged over the window. */
+  .card.drop { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow); }
+  .dropmask {
+    position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0;
+    border-radius: 16px; display: none;
+    align-items: center; justify-content: center; pointer-events: none;
+    /* Plain colour first: color-mix() needs a newer WebKit than the declared
+       minimum macOS, and an unsupported declaration would leave this see-through. */
+    background: var(--accent-wash);
+    background: color-mix(in srgb, var(--accent) 10%, var(--card));
+    color: var(--accent); font-family: var(--serif); font-size: 14px;
+    font-style: italic; letter-spacing: .01em;
+  }
+  .card.drop .dropmask { display: flex; }
+  .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+  .target {
+    font-family: var(--serif); font-size: 14px; color: var(--muted); font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  .target span { color: var(--text); }
+  .hint {
+    font-size: 10px; color: var(--faint); flex: 0 0 auto;
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  textarea {
+    flex: 1; resize: none; border: none; outline: none; background: transparent;
+    color: var(--text); font: inherit; font-size: 14.5px; line-height: 1.5;
+  }
+  textarea::placeholder { color: var(--faint); }
+  .pending {
+    display: none; flex: 0 0 auto; margin-top: 7px;
+    font-size: 10.5px; color: var(--accent); letter-spacing: .02em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .saved { color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="top">
+      <div class="target">to <span id="target">…</span></div>
+      <div class="hint" id="hint">Enter saves · Esc cancels</div>
+    </div>
+    <textarea id="input" placeholder="Write a note, or drop files here…"></textarea>
+    <div class="pending" id="pending"></div>
+    <div class="dropmask" id="dropmask">Drop to save to this note</div>
+  </div>
+
+<script>
+  // This window only ever loads inside the Msg2Note app, but guard the Tauri
+  // bridge anyway so opening quick.html as a plain file shows a message rather
+  // than a blank box.
+  const input = document.getElementById('input');
+  const targetEl = document.getElementById('target');
+  const hintEl = document.getElementById('hint');
+  const card = document.querySelector('.card');
+  const pendingEl = document.getElementById('pending');
+  const DEFAULT_HINT = 'Enter saves · Esc cancels';
+  // Files dropped onto the window queue up here until you press Enter, so you can
+  // drop several (across multiple drags) and add a note before saving them all.
+  let pendingFiles = [];
+  // Declared up here, ahead of every handler that touches them: `let` is not
+  // hoisted, so a declaration further down would be a temporal-dead-zone error
+  // for anything that ran first.
+  let dragging = false;
+  let hideTimer = null;
+  const basename = (p) => p ? p.split(/[\\/]/).pop() : p;
+  function renderPending() {
+    if (!pendingFiles.length) { pendingEl.style.display = 'none'; pendingEl.textContent = ''; return; }
+    pendingEl.style.display = 'block';
+    pendingEl.textContent = '📎 ' + pendingFiles.map(f => f.name).join(', ');
+  }
+  if (!(window.__TAURI__ && window.__TAURI__.core)) {
+    targetEl.textContent = 'not in app';
+    hintEl.textContent = 'Open Msg2Note from the menu bar.';
+    input.disabled = true;
+    throw new Error('Msg2Note backend not attached');
+  }
+  const { invoke } = window.__TAURI__.core;
+  const { getCurrentWindow } = window.__TAURI__.window;
+  const win = getCurrentWindow();
+  let target = null;
+
+  function applyTarget(t) {
+    target = t;
+    targetEl.textContent = t ? t.name : 'no target';
+  }
+
+  async function refreshTarget() {
+    try { applyTarget(await invoke('get_quick_target')); } catch (e) { console.error(e); }
+  }
+
+  // Initial load + every time the hotkey re-opens this window.
+  refreshTarget();
+  window.__TAURI__.event.listen('quick-open', (e) => {
+    applyTarget(e.payload);
+    input.value = '';
+    pendingFiles = [];
+    renderPending();
+    hintEl.textContent = DEFAULT_HINT;
+    hintEl.className = 'hint';
+    dragging = false;
+    clearTimeout(hideTimer);
+    card.classList.remove('drop');
+    setTimeout(() => input.focus(), 30);
+  });
+
+  setTimeout(() => input.focus(), 50);
+
+  // Set for the duration of a save. Holding Enter auto-repeats the keydown
+  // every few dozen milliseconds, and the text box is only cleared once the
+  // append resolves — so without this, one held key files the same note over
+  // and over.
+  let saving = false;
+
+  async function save() {
+    if (saving) return;
+    if (!target) {
+      // Say so rather than hiding: hiding would discard whatever was typed.
+      hintEl.textContent = '✗ No bot selected — press the bot\'s hotkey again.';
+      hintEl.className = 'hint';
+      return;
+    }
+    const text = input.value.trim();
+    const files = pendingFiles.map(f => f.path);
+    // Nothing typed and nothing queued — just dismiss.
+    if (!text && !files.length) { win.hide(); return; }
+    saving = true;
+    try {
+      if (text) { await invoke('append_note', { id: target.id, text }); input.value = ''; }
+      let savedFiles = 0;
+      if (files.length) { savedFiles = await invoke('save_files', { id: target.id, paths: files }); }
+      pendingFiles = [];
+      renderPending();
+      const parts = [];
+      if (text) parts.push('note');
+      if (savedFiles) parts.push(savedFiles + ' file' + (savedFiles === 1 ? '' : 's'));
+      hintEl.textContent = 'Saved ' + parts.join(' + ') + ' ✓';
+      hintEl.className = 'hint saved';
+      // Tracked like every other pending hide: reopening within this window
+      // (hotkey pressed right after a save) must cancel it, or the freshly shown
+      // popup vanishes again.
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => win.hide(), 400);
+    } catch (e) {
+      hintEl.textContent = '✗ ' + e;
+      hintEl.className = 'hint';
+    } finally {
+      saving = false;
+    }
+  }
+
+  // Bound to the window, not the textarea: clicking the card moves focus off the
+  // textarea, and this popup has no title bar to close, so Esc must always work.
+  window.addEventListener('keydown', (e) => {
+    // Enter while an IME candidate window is open is "commit this character",
+    // not "save" — saving there would file a half-typed word and clear the box.
+    if (e.isComposing || e.keyCode === 229) return;
+    // A repeat is the key still being held, never a second deliberate save.
+    if (e.repeat && e.key === 'Enter') { e.preventDefault(); return; }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); }
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      input.value = '';
+      pendingFiles = [];
+      renderPending();
+      clearTimeout(hideTimer);
+      win.hide();
+    }
+  });
+
+  // ---- file drag-and-drop ----
+  // Copy dropped files into this note's destination folder via the backend.
+  //
+  // Grabbing a file from Finder activates Finder, which blurs (and would
+  // normally hide) this popup before the drag ever reaches it. So defer the
+  // hide briefly and let an incoming drag cancel it, instead of hiding at once.
+  //
+  // The condition is re-checked when the timer *fires*, not when it is
+  // scheduled: a drag that re-enters the window, or focus coming back, keeps the
+  // popup open — dragging out and back in can easily outlast the delay.
+  function scheduleHide() {
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      if (dragging || document.hasFocus()) return;
+      // Don't auto-dismiss queued files or a typed note out of existence — that
+      // work would be lost. Esc cancels explicitly; a successful save still hides.
+      if (pendingFiles.length || input.value.trim()) return;
+      win.hide();
+    }, 400);
+  }
+
+  // Queue dropped files instead of saving immediately, so you can drop several
+  // (across multiple drags) and optionally add a note, then press Enter to save
+  // them all at once. The window stays up and refocuses, ready for more.
+  function addPending(paths) {
+    const files = (paths || []).filter(Boolean);
+    if (!files.length) return;
+    for (const p of files) {
+      if (!pendingFiles.some(f => f.path === p)) pendingFiles.push({ path: p, name: basename(p) });
+    }
+    renderPending();
+    hintEl.textContent = pendingFiles.length + ' file' + (pendingFiles.length === 1 ? '' : 's') + ' ready · Enter to save · Esc to cancel';
+    hintEl.className = 'hint';
+    // Keep the popup open and focused for another drop, a note, or Enter.
+    clearTimeout(hideTimer);
+    win.setFocus().catch(() => {});
+    setTimeout(() => input.focus(), 30);
+  }
+
+  // Tauri captures OS file drops (dragDropEnabled is on by default) and emits
+  // these events with real filesystem paths — exactly what save_files needs.
+  const ev = window.__TAURI__.event;
+  ev.listen('tauri://drag-enter', () => {
+    dragging = true;
+    clearTimeout(hideTimer);
+    card.classList.add('drop');
+  });
+  ev.listen('tauri://drag-over', () => {
+    dragging = true;
+    clearTimeout(hideTimer);
+  });
+  ev.listen('tauri://drag-leave', () => {
+    dragging = false;
+    card.classList.remove('drop');
+    // The drag left without dropping; if we're not the active window, dismiss.
+    if (!document.hasFocus()) scheduleHide();
+  });
+  ev.listen('tauri://drag-drop', (e) => {
+    dragging = false;
+    card.classList.remove('drop');
+    const paths = (e.payload && e.payload.paths) || [];
+    addPending(paths);
+  });
+
+  // Dismiss when the window loses focus (e.g. you click elsewhere), unless a
+  // file is being dragged in.
+  window.addEventListener('blur', () => { scheduleHide(); });
+</script>
+</body>
+</html>
